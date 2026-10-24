@@ -1,0 +1,20 @@
+dependencies:
+  espressif/lua:
+    component_hash: f75e767cefb57380576a1f136ec60b18999687f5c4213e967344706feda35928
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 5.5.1
+  idf:
+    source:
+      type: idf
+    version: 6.1.0
+direct_dependencies:
+- espressif/lua
+manifest_hash: 1f2c72549939fa7aa7a1dcff048efc3beac93d799d9f8a0321ade96b21372637
+target: esp32s3
+version: 3.0.0

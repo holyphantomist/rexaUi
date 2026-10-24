@@ -1,0 +1,47 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "NOVA PlatformIO Build",
+			"type": "shell",
+			"command": "${env:USERPROFILE}\\.platformio\\penv\\Scripts\\platformio.exe",
+			"args": [
+				"run",
+				"-e",
+				"esp32-s3-devkitm-1"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "NOVA PlatformIO Upload",
+			"type": "shell",
+			"command": "${env:USERPROFILE}\\.platformio\\penv\\Scripts\\platformio.exe",
+			"args": [
+				"run",
+				"-e",
+				"esp32-s3-devkitm-1",
+				"--target",
+				"upload"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "NOVA Serial Monitor",
+			"type": "shell",
+			"command": "${env:USERPROFILE}\\.platformio\\penv\\Scripts\\platformio.exe",
+			"args": [
+				"device",
+				"monitor",
+				"--port",
+				"COM11",
+				"--baud",
+				"115200"
+			],
+			"isBackground": true,
+			"problemMatcher": []
+		}
+	]
+}
