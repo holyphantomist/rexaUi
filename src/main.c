@@ -272,6 +272,10 @@ static view_t previous_view = VIEW_HOME;
 static unsigned selected_item = 0;
 static int64_t transition_started_us = 0;
 static bool transition_active = false;
+static int transition_dir = 1;
+static float home_pos = 0.0f;
+static bool ui_animating = false;
+static int64_t ui_step_us = 0;
 static bool button_candidate_down = false;
 static bool button_stable_down = false;
 static int64_t button_change_us = 0;
@@ -1914,30 +1918,66 @@ static void draw_home(void)
         color565(126, 34, 206), color565(190, 24, 93), color565(109, 40, 217),
                 color565(21, 128, 61), color565(234, 88, 12)
             };
-    static const int offsets[] = {-2, 2, -1, 1, 0};
-    static const int widths[] = {8, 8, 52, 52, 180};
-    static const int lefts[] = {2, 310, 14, 254, 70};
-    for (unsigned slot = 0; slot < 5; ++slot) {
-        unsigned item = (selected_item + HOME_ITEM_COUNT + (unsigned)(offsets[slot] + (int)HOME_ITEM_COUNT)) %
-                        HOME_ITEM_COUNT;
-        bool center = offsets[slot] == 0;
-        unsigned fade = center ? 0 : (offsets[slot] == -1 || offsets[slot] == 1 ? 90 : 150);
+    static const float width_key[] = {180.0f, 52.0f, 8.0f, 0.0f};
+    static const float offset_key[] = {0.0f, 120.0f, 154.0f, 175.0f};
+    static const float fade_key[] = {0.0f, 90.0f, 150.0f, 210.0f};
+    static const float height_key[] = {122.0f, 110.0f, 98.0f, 86.0f};
+    float dist[HOME_ITEM_COUNT];
+    unsigned order[HOME_ITEM_COUNT];
+    unsigned visible = 0;
+    for (unsigned item = 0; item < HOME_ITEM_COUNT; ++item) {
+        float d = (float)item - home_pos;
+        while (d > (float)HOME_ITEM_COUNT / 2.0f) d -= (float)HOME_ITEM_COUNT;
+        while (d < -(float)HOME_ITEM_COUNT / 2.0f) d += (float)HOME_ITEM_COUNT;
+        dist[item] = d;
+        if (fabsf(d) < 2.95f) {
+            order[visible++] = item;
+        }
+    }
+    for (unsigned i = 1; i < visible; ++i) {
+        unsigned key = order[i];
+        unsigned j = i;
+        while (j > 0 && fabsf(dist[order[j - 1]]) < fabsf(dist[key])) {
+            order[j] = order[j - 1];
+            --j;
+        }
+        order[j] = key;
+    }
+    for (unsigned n = 0; n < visible; ++n) {
+        unsigned item = order[n];
+        float d = dist[item];
+        float ad = fabsf(d);
+        unsigned seg = (unsigned)ad;
+        float frac = ad - (float)seg;
+        float w = width_key[seg] + (width_key[seg + 1] - width_key[seg]) * frac;
+        float off = offset_key[seg] + (offset_key[seg + 1] - offset_key[seg]) * frac;
+        float fade_amount = fade_key[seg] + (fade_key[seg + 1] - fade_key[seg]) * frac;
+        float h = height_key[seg] + (height_key[seg + 1] - height_key[seg]) * frac;
+        int width = (int)(w + 0.5f);
+        if (width < 4) {
+            continue;
+        }
+        int height = (int)(h + 0.5f);
+        int center_x = 160 + (int)(d < 0.0f ? -off - 0.5f : off + 0.5f);
+        int left = center_x - width / 2;
+        int top_y = 89 - height / 2;
+        unsigned fade = (unsigned)fade_amount;
         uint16_t top = mix_color(tops[item], C_BG_BOTTOM, fade);
         uint16_t bottom = mix_color(bottoms[item], C_BG_BOTTOM, fade);
-        fill_gradient_card(lefts[slot], 28, widths[slot], 122, 14, top, bottom);
+        fill_gradient_card(left, top_y, width, height, 14, top, bottom);
         icon_cut_color = mix_color(top, bottom, 100);
-        int center_x = lefts[slot] + widths[slot] / 2;
-        if (center && (item == 0 || item == 1)) {
-            draw_home_widget(item, lefts[slot], widths[slot], &local_time, valid_time);
-        } else if (center) {
+        if ((item == 0 || item == 1) && width >= 150) {
+            draw_home_widget(item, left, width, &local_time, valid_time);
+        } else if (width >= 100) {
             draw_icon(icon_ids[item], center_x, 66, C_TEXT);
             draw_centered_text(center_x, 124, labels[item], 1, C_TEXT);
-        } else if (widths[slot] >= 52) {
-            uint16_t faded = mix_color(C_TEXT, bottom, 90);
+        } else if (width >= 30) {
+            int icon_y = 86 - (int)(20.0f * (1.0f - ad > 0.0f ? 1.0f - ad : 0.0f));
+            uint16_t faded = mix_color(C_TEXT, bottom, fade);
             if (item == 1) {
-                draw_weather_icon(center_x, 86, weather_ready() ? weather_data.code : 2, 13);
+                draw_weather_icon(center_x, icon_y, weather_ready() ? weather_data.code : 2, 13);
             } else {
-                draw_icon(icon_ids[item], center_x, 86, faded);
+                draw_icon(icon_ids[item], center_x, icon_y, faded);
             }
         }
     }
@@ -5489,27 +5529,64 @@ static void transition_to(view_t next_view)
     }
     previous_view = current_view;
     current_view = next_view;
+    transition_dir = (next_view == VIEW_HOME || (next_view == VIEW_SETTINGS &&
+                      previous_view != VIEW_HOME)) ? -1 : 1;
     transition_started_us = esp_timer_get_time();
     transition_active = next_view != VIEW_MEDIA && previous_view != VIEW_MEDIA;
 }
 
-static void apply_transition_fade(float amount)
+static void apply_transition(float amount, int shift)
 {
+    if (amount >= 0.999f && shift == 0) {
+        return;
+    }
+    if (shift != 0) {
+        int distance = shift > 0 ? shift : -shift;
+        for (int y = 0; y < LCD_HEIGHT; ++y) {
+            uint16_t *row = framebuffer + y * LCD_WIDTH;
+            if (shift > 0) {
+                memmove(row + distance, row, (size_t)(LCD_WIDTH - distance) * 2);
+                memset(row, 0, (size_t)distance * 2);
+            } else {
+                memmove(row, row + distance, (size_t)(LCD_WIDTH - distance) * 2);
+                memset(row + LCD_WIDTH - distance, 0, (size_t)distance * 2);
+            }
+        }
+    }
     if (amount >= 0.999f) {
         return;
     }
+    unsigned scale = (unsigned)(amount * 256.0f);
     for (int i = 0; i < LCD_WIDTH * LCD_HEIGHT; ++i) {
         uint16_t color = framebuffer[i];
         color = (uint16_t)((color << 8) | (color >> 8));
-        unsigned red = (color >> 11) & 0x1f;
-        unsigned green = (color >> 5) & 0x3f;
-        unsigned blue = color & 0x1f;
-        red = (unsigned)(red * amount);
-        green = (unsigned)(green * amount);
-        blue = (unsigned)(blue * amount);
+        unsigned red = (((color >> 11) & 0x1f) * scale) >> 8;
+        unsigned green = (((color >> 5) & 0x3f) * scale) >> 8;
+        unsigned blue = ((color & 0x1f) * scale) >> 8;
         uint16_t scaled = (uint16_t)((red << 11) | (green << 5) | blue);
         framebuffer[i] = (uint16_t)((scaled << 8) | (scaled >> 8));
     }
+}
+
+static void ui_animation_step(int64_t now_us)
+{
+    float dt = ui_step_us == 0 ? 0.033f : (float)(now_us - ui_step_us) / 1000000.0f;
+    ui_step_us = now_us;
+    if (dt > 0.1f) {
+        dt = 0.1f;
+    }
+    float diff = (float)selected_item - home_pos;
+    while (diff > (float)HOME_ITEM_COUNT / 2.0f) diff -= (float)HOME_ITEM_COUNT;
+    while (diff < -(float)HOME_ITEM_COUNT / 2.0f) diff += (float)HOME_ITEM_COUNT;
+    if (fabsf(diff) < 0.01f) {
+        home_pos = (float)selected_item;
+        ui_animating = false;
+        return;
+    }
+    home_pos += diff * (1.0f - expf(-dt * 14.0f));
+    while (home_pos < 0.0f) home_pos += (float)HOME_ITEM_COUNT;
+    while (home_pos >= (float)HOME_ITEM_COUNT) home_pos -= (float)HOME_ITEM_COUNT;
+    ui_animating = true;
 }
 
 static direction_t read_direction(void)
@@ -6174,6 +6251,74 @@ static void draw_sleep_clock(void)
     ESP_ERROR_CHECK(display_present());
 }
 
+typedef struct {
+    const char *name;
+    void (*run)(int64_t now_us);
+    int64_t period_us;
+    int64_t next_us;
+    uint32_t runs;
+    uint32_t max_us;
+} kernel_task_t;
+
+#define KERNEL_MAX_TASKS 8
+static kernel_task_t kernel_tasks[KERNEL_MAX_TASKS];
+static unsigned kernel_task_count = 0;
+
+static void kernel_register(const char *name, void (*run)(int64_t), int64_t period_us)
+{
+    if (kernel_task_count < KERNEL_MAX_TASKS) {
+        kernel_tasks[kernel_task_count++] = (kernel_task_t){
+            .name = name, .run = run, .period_us = period_us};
+    }
+}
+
+// Cooperative microkernel: each service runs only when its own period is due.
+static void kernel_tick(int64_t now_us)
+{
+    for (unsigned i = 0; i < kernel_task_count; ++i) {
+        kernel_task_t *task = &kernel_tasks[i];
+        if (now_us < task->next_us) {
+            continue;
+        }
+        task->run(now_us);
+        int64_t spent = esp_timer_get_time() - now_us;
+        if (spent > (int64_t)task->max_us) {
+            task->max_us = (uint32_t)spent;
+        }
+        task->runs++;
+        task->next_us = now_us + task->period_us;
+    }
+}
+
+static void battery_task(int64_t now_us)
+{
+    (void)now_us;
+    update_voltage();
+}
+
+static void storage_task(int64_t now_us)
+{
+    if (brightness_dirty && now_us - brightness_last_change_us >= 900000) {
+        save_brightness();
+    }
+}
+
+static void game_task(int64_t now_us)
+{
+    if (current_view == VIEW_GAME) {
+        step_game();
+        last_game_step_us = now_us;
+    }
+}
+
+static bool slow_view(view_t view)
+{
+    return view == VIEW_HOME || view == VIEW_CLOCK || view == VIEW_SETTINGS ||
+           view == VIEW_BRIGHTNESS || view == VIEW_SLEEP_SETTINGS || view == VIEW_POWER ||
+           view == VIEW_LANGUAGE || view == VIEW_CLOCK_SETTINGS || view == VIEW_WEATHER ||
+           view == VIEW_SYSTEM;
+}
+
 void app_main(void)
 {
     app_started_us = esp_timer_get_time();
@@ -6205,6 +6350,16 @@ void app_main(void)
     update_voltage();
     last_voltage_us = esp_timer_get_time();
     last_user_input_us = app_started_us;
+    kernel_register("sd", sd_service, 20000);
+    kernel_register("weather", weather_service, 250000);
+    kernel_register("led", led_service, 25000);
+    kernel_register("power", power_estimate_service, 1000000);
+    kernel_register("battery", battery_task, 1000000);
+    kernel_register("storage", storage_task, 100000);
+    kernel_register("game", game_task, 190000);
+    int64_t next_frame_us = 0;
+    int64_t ui_active_until_us = 0;
+    bool fast_media = false;
 
     ESP_LOGI(TAG, "rexaUi arayuzu baslatildi; parlaklik %% %u", (unsigned)brightness);
     while (true) {
@@ -6214,6 +6369,7 @@ void app_main(void)
         if (sleep_mode_active) {
             if (direction != DIR_NONE || button_pressed) {
                 exit_sleep_mode();
+                next_frame_us = 0;
                 last_user_input_us = now_us;
                 last_direction = DIR_NONE;
                 transition_active = false;
@@ -6243,10 +6399,7 @@ void app_main(void)
                 continue;
             }
         }
-        sd_service(now_us);
-        weather_service(now_us);
-        led_service(now_us);
-        power_estimate_service(now_us);
+        kernel_tick(now_us);
         bool direction_event = false;
         if (direction == DIR_NONE) {
             last_direction = DIR_NONE;
@@ -6257,37 +6410,43 @@ void app_main(void)
             last_direction_us = now_us;
         }
         handle_input(direction_event ? direction : DIR_NONE, button_pressed);
-
-        if (brightness_dirty && now_us - brightness_last_change_us >= 900000) {
-            save_brightness();
-        }
-        if (current_view == VIEW_GAME && now_us - last_game_step_us >= 190000) {
-            step_game();
-            last_game_step_us = now_us;
-        }
-        if (now_us - last_voltage_us >= 1000000) {
-            update_voltage();
-            last_voltage_us = now_us;
+        if (direction_event || button_pressed) {
+            ui_active_until_us = now_us + 700000;
+            next_frame_us = 0;
         }
 
-        float fade = 1.0f;
-        view_t view_to_draw = current_view;
-        if (transition_active) {
-            float progress = (float)(now_us - transition_started_us) / 300000.0f;
-            if (progress >= 1.0f) {
-                transition_active = false;
-            } else if (progress < 0.5f) {
-                view_to_draw = previous_view;
-                fade = 1.0f - progress * 2.0f;
-            } else {
-                fade = (progress - 0.5f) * 2.0f;
+        if (now_us >= next_frame_us) {
+            ui_animation_step(now_us);
+            float fade = 1.0f;
+            int shift = 0;
+            view_t view_to_draw = current_view;
+            if (transition_active) {
+                float progress = (float)(now_us - transition_started_us) / 260000.0f;
+                if (progress >= 1.0f) {
+                    transition_active = false;
+                } else if (progress < 0.5f) {
+                    float e = progress * 2.0f;
+                    view_to_draw = previous_view;
+                    fade = 1.0f - e * e;
+                    shift = -transition_dir * (int)(e * e * 28.0f);
+                } else {
+                    float e = (progress - 0.5f) * 2.0f;
+                    float inv = 1.0f - e;
+                    fade = 1.0f - inv * inv * inv;
+                    shift = transition_dir * (int)(inv * inv * 28.0f);
+                }
             }
-            fade = fade * fade * (3.0f - 2.0f * fade);
+            render_view(view_to_draw);
+            apply_transition(fade, shift);
+            ESP_ERROR_CHECK(display_present());
+            fast_media = current_view == VIEW_MEDIA && media_state == MEDIA_ANIMATED;
+            bool animating = transition_active || ui_animating || now_us < ui_active_until_us;
+            uint32_t frame_ms = power_saver ? 50 : FRAME_INTERVAL_MS;
+            if (!animating && slow_view(current_view)) {
+                frame_ms = power_saver ? 400 : 200;
+            }
+            next_frame_us = fast_media ? 0 : esp_timer_get_time() + (int64_t)frame_ms * 1000;
         }
-        render_view(view_to_draw);
-        apply_transition_fade(fade);
-        ESP_ERROR_CHECK(display_present());
-        bool fast_media = current_view == VIEW_MEDIA && media_state == MEDIA_ANIMATED;
-        vTaskDelay(fast_media ? 1 : pdMS_TO_TICKS(power_saver ? 50 : FRAME_INTERVAL_MS));
+        vTaskDelay(fast_media ? 1 : pdMS_TO_TICKS(power_saver ? 20 : 10));
     }
 }
